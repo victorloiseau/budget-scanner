@@ -81,10 +81,11 @@ def init_sheet(ws):
     for (label, _), s, r in zip(CATEGORIES, BUDGET_SERRE, BUDGET_REALISTE):
         n = 5 + len(rows)
         rows.append([label, s, r, 0, f"=D{n}-C{n}", ""])
-    ws.update(f"A5:F{4+len(rows)}", rows)
+    ws.update(f"A5:F{4+len(rows)}", rows, value_input_option="USER_ENTERED")
     t = 5 + len(rows)
     ws.update(f"A{t}:F{t}", [["TOTAL", sum(BUDGET_SERRE), sum(BUDGET_REALISTE),
-                               f"=SUM(D5:D{t-1})", f"=D{t}-C{t}", ""]])
+                               f"=SUM(D5:D{t-1})", f"=D{t}-C{t}", ""]],
+              value_input_option="USER_ENTERED")
 
 def read_current(ws, row):
     val = ws.cell(row, REEL_COL).value
