@@ -9,9 +9,10 @@ from datetime import date
 # ── Config ────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Tickets → Budget", page_icon="🧾", layout="centered")
 
-SHEET_NAME = "Tracker mensuel"
-REEL_COL   = 4
-NOTE_COL   = 6
+SHEET_NAME   = "Tracker mensuel"
+JOURNAL_NAME = "Journal"
+REEL_COL     = 4
+NOTE_COL     = 6
 
 CATEGORIES = [
     ("Epicerie",                  5),
@@ -69,6 +70,27 @@ def get_gsheet():
         return sh, sh.worksheet(SHEET_NAME)
     except gspread.WorksheetNotFound:
         return sh, None
+
+def get_or_create_journal(sh):
+    try:
+        return sh.worksheet(JOURNAL_NAME)
+    except gspread.WorksheetNotFound:
+        jws = sh.add_worksheet(JOURNAL_NAME, rows=1000, cols=5)
+        blue  = {"red": 0.263, "green": 0.522, "blue": 0.957}
+        white = {"red": 1.0,   "green": 1.0,   "blue": 1.0}
+        jws.update("A1:E1", [["Date", "Magasin", "Categorie", "Montant ($ CA)", "Note"]],
+                   value_input_option="USER_ENTERED")
+        jws.format("A1:E1", {
+            "backgroundColor": blue,
+            "textFormat": {"bold": True, "foregroundColor": white},
+            "horizontalAlignment": "CENTER",
+        })
+        jws.format("D2:D1000", {"numberFormat": {"type": "NUMBER", "pattern": "#,##0.00"}})
+        return jws
+
+def log_expense(jws, expense_date, store, category, amount, note):
+    jws.append_row([expense_date, store, category, amount, note or ""],
+                   value_input_option="USER_ENTERED")
 
 def init_sheet(ws):
     ws.clear()
@@ -163,6 +185,7 @@ st.caption("Photo du ticket → dépense ajoutée automatiquement dans Google Sh
 
 try:
     sh, ws = get_gsheet()
+    jws = get_or_create_journal(sh)
 except Exception as e:
     st.error(f"Connexion Google Sheets impossible : {e}")
     st.stop()
@@ -262,6 +285,7 @@ st.markdown(f"| **{category}** | Avant : {before:.2f} $ | Après : **{after:.2f}
 if st.button("✅ Ajouter au budget", type="primary", use_container_width=True):
     try:
         save_expense(ws, row, amount, note)
+        log_expense(jws, date.today().isoformat(), st.session_state["store"], category, amount, note)
         st.success(f"**{amount:.2f} $ CA** ajouté à **{category}** — total : **{after:.2f} $ CA**")
         st.markdown(f"[Voir dans Google Sheets]({sheet_url})")
         st.balloons()
