@@ -35,7 +35,7 @@ CAT_NAMES = [n for n, _ in CATEGORIES]
 CAT_ROW   = {n: r for n, r in CATEGORIES}
 
 BUDGET_SERRE    = [200,  0,  0, 55, 20,  0, 25, 10, 15, 10,  30,  0,  0, 20,  50]
-BUDGET_REALISTE = [270, 80, 20, 55, 40,  0, 40, 20, 50, 20, 100, 20, 15, 20, 100]
+BUDGET_REALISTE = [300, 80, 20, 55, 40,  0, 40, 20, 50, 20, 130, 20, 40, 20, 140]
 
 AUTO_DETECT = {
     "Epicerie":                 ["maxi","iga","metro","provigo","costco","walmart",
