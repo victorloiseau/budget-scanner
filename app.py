@@ -79,7 +79,7 @@ def get_api_key() -> str | None:
 # ── Analyse du ticket ─────────────────────────────────────────────────────────
 def analyze_receipt(image: Image.Image, api_key: str) -> dict:
     buf = io.BytesIO()
-    image.save(buf, format="JPEG", quality=90)
+    image.convert("RGB").save(buf, format="JPEG", quality=90)
     b64 = base64.standard_b64encode(buf.getvalue()).decode()
 
     client = anthropic.Anthropic(api_key=api_key)
