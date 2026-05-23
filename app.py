@@ -57,15 +57,18 @@ SCOPES = [
 
 # ── Google Sheets ─────────────────────────────────────────────────────────────
 @st.cache_resource
-def get_gsheet():
+def get_client():
     creds = Credentials.from_service_account_info(
         dict(st.secrets["gcp_service_account"]), scopes=SCOPES)
-    gc = gspread.authorize(creds)
+    return gspread.authorize(creds)
+
+def get_gsheet():
+    gc = get_client()
     sh = gc.open_by_key(st.secrets["SPREADSHEET_ID"])
     try:
-        return sh.worksheet(SHEET_NAME)
+        return sh, sh.worksheet(SHEET_NAME)
     except gspread.WorksheetNotFound:
-        return None
+        return sh, None
 
 def init_sheet(ws):
     ws.update("A1:A2", [
@@ -135,28 +138,35 @@ st.title("🧾 Tickets de caisse → Budget Montréal")
 st.caption("Photo du ticket → dépense ajoutée automatiquement dans Google Sheets.")
 
 try:
-    ws = get_gsheet()
+    sh, ws = get_gsheet()
 except Exception as e:
     st.error(f"Connexion Google Sheets impossible : {e}")
     st.stop()
 
 if ws is None:
-    st.warning(f"La feuille '{SHEET_NAME}' n'existe pas encore.")
-    if st.button("Initialiser le budget dans Google Sheets", type="primary"):
-        creds = Credentials.from_service_account_info(
-            dict(st.secrets["gcp_service_account"]), scopes=SCOPES)
-        sh = gspread.authorize(creds).open_by_key(st.secrets["SPREADSHEET_ID"])
-        ws = sh.add_worksheet(SHEET_NAME, rows=30, cols=6)
-        init_sheet(ws)
-        st.cache_resource.clear()
-        st.success("Budget initialisé !")
-        st.rerun()
+    with st.spinner("Initialisation du budget..."):
+        try:
+            ws = sh.add_worksheet(SHEET_NAME, rows=30, cols=6)
+            init_sheet(ws)
+            st.rerun()
+        except Exception as e:
+            st.error(f"Erreur initialisation : {e}")
+            st.stop()
+
+try:
+    header_val = ws.cell(4, 1).value
+except Exception as e:
+    st.error(f"Erreur lecture sheet : {e}")
     st.stop()
 
-if ws.cell(4, 1).value != "Poste":
-    init_sheet(ws)
-    st.cache_resource.clear()
-    st.rerun()
+if header_val != "Poste":
+    with st.spinner("Mise en place du budget..."):
+        try:
+            init_sheet(ws)
+            st.rerun()
+        except Exception as e:
+            st.error(f"Erreur init : {e}")
+            st.stop()
 
 sheet_url = f"https://docs.google.com/spreadsheets/d/{st.secrets['SPREADSHEET_ID']}"
 st.markdown(f"[📊 Voir le budget en direct]({sheet_url})")
