@@ -1,24 +1,17 @@
 import streamlit as st
 import anthropic
-import base64
-import json
-import re
-import os
-import io
+import gspread
+from google.oauth2.service_account import Credentials
+import json, base64, re, io
 from PIL import Image
-import openpyxl
 from datetime import date
 
 # ── Config ────────────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Tickets → Budget",
-    page_icon="🧾",
-    layout="centered",
-)
+st.set_page_config(page_title="Tickets → Budget", page_icon="🧾", layout="centered")
 
 SHEET_NAME = "Tracker mensuel"
-REEL_COL   = 4
-NOTE_COL   = 6
+REEL_COL   = 4   # colonne D (1-based)
+NOTE_COL   = 6   # colonne F
 
 CATEGORIES = [
     ("Epicerie",                  5),
@@ -40,168 +33,165 @@ CATEGORIES = [
 CAT_NAMES = [n for n, _ in CATEGORIES]
 CAT_ROW   = {n: r for n, r in CATEGORIES}
 
-# ── API key ───────────────────────────────────────────────────────────────────
+BUDGET_SERRE    = [200, 0, 0, 55, 20, 0, 25, 10, 15, 10, 30, 0, 0, 20, 50]
+BUDGET_REALISTE = [270,80,20, 55, 40, 0, 40, 20, 50, 20,100,20,15, 20,100]
+
+# ── Connexions ────────────────────────────────────────────────────────────────
+def get_gsheet() -> gspread.Worksheet:
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(
+        creds_dict,
+        scopes=["https://spreadsheets.google.com/feeds",
+                "https://www.googleapis.com/auth/drive"],
+    )
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(st.secrets["SPREADSHEET_ID"])
+    try:
+        return sh.worksheet(SHEET_NAME)
+    except gspread.WorksheetNotFound:
+        return None
+
+def init_sheet(ws: gspread.Worksheet):
+    """Initialise la structure du tracker si la feuille est vide."""
+    headers = ["Poste de depense", "Budget serre ($ CA)", "Budget realiste ($ CA)",
+               "REEL ($ CA)", "Ecart vs Realiste", "Notes / Date"]
+    ws.update("A4:F4", [headers])
+    rows = []
+    for (label, _), s, r in zip(CATEGORIES, BUDGET_SERRE, BUDGET_REALISTE):
+        rows.append([label, s, r, 0, f"=D{5+len(rows)}-C{5+len(rows)}", ""])
+    ws.update(f"A5:F{4+len(rows)}", rows)
+    total_row = 5 + len(rows)
+    ws.update(f"A{total_row}:F{total_row}",
+              [["TOTAL",
+                sum(BUDGET_SERRE),
+                sum(BUDGET_REALISTE),
+                f"=SUM(D5:D{total_row-1})",
+                f"=D{total_row}-C{total_row}",
+                ""]])
+    ws.update("A1", [["Budget Montreal - Victor Loiseau"]])
+    ws.update("A2", [["Logement + chauffage + electricite inclus dans Darlington - non comptes"]])
+
 def get_api_key() -> str | None:
-    # 1. Streamlit secrets (déploiement cloud)
     if "ANTHROPIC_API_KEY" in st.secrets:
         return st.secrets["ANTHROPIC_API_KEY"]
-    # 2. Variable d'environnement (local)
-    if "ANTHROPIC_API_KEY" in os.environ:
-        return os.environ["ANTHROPIC_API_KEY"]
     return None
 
-
-# ── Analyse du ticket via Claude Vision ───────────────────────────────────────
+# ── Analyse du ticket ─────────────────────────────────────────────────────────
 def analyze_receipt(image: Image.Image, api_key: str) -> dict:
     buf = io.BytesIO()
     image.save(buf, format="JPEG", quality=90)
     b64 = base64.standard_b64encode(buf.getvalue()).decode()
 
     client = anthropic.Anthropic(api_key=api_key)
+    prompt = f"""Analyse ce ticket de caisse. Reponds UNIQUEMENT avec un JSON valide, sans markdown.
 
-    prompt = f"""Analyse ce ticket de caisse et réponds UNIQUEMENT avec un objet JSON valide, sans markdown, sans explication.
-
-Format attendu :
+Format :
 {{
-  "store": "nom exact du magasin ou commerce",
+  "store": "nom du magasin",
   "total": 12.34,
   "date": "{date.today().isoformat()}",
-  "category": "categorie exacte parmi la liste ci-dessous",
-  "items_summary": "résumé bref des achats en 1 ligne"
+  "category": "categorie exacte parmi la liste",
+  "items_summary": "resume bref en 1 ligne"
 }}
 
-Catégories disponibles (choisis la plus adaptée, texte exact) :
-- Epicerie
-- Restaurants / cafeteria
-- Cafe / boissons
-- Pharmacie
-- Hygiene & soin
-- Livres & materiel etudes
-- Sorties & loisirs
-- Sport / gym
-- Streaming
-- Impression / fournitures
-- Imprevus
+Categories disponibles (texte exact) :
+Epicerie | Restaurants / cafeteria | Cafe / boissons | Pharmacie | Hygiene & soin |
+Livres & materiel etudes | Sorties & loisirs | Sport / gym | Streaming |
+Impression / fournitures | Imprevus
 
-Si le total n'est pas lisible sur le ticket, mets null.
-Si la date n'est pas lisible, mets "{date.today().isoformat()}".
-Réponds uniquement avec le JSON, sans rien d'autre."""
+Si total illisible : null. Si date illisible : "{date.today().isoformat()}"."""
 
     msg = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=400,
+        max_tokens=300,
         messages=[{
             "role": "user",
             "content": [
-                {
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
-                },
+                {"type": "image",
+                 "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
                 {"type": "text", "text": prompt},
             ],
         }],
     )
-
-    raw = msg.content[0].text.strip()
-    # Nettoie les éventuels blocs markdown
-    raw = re.sub(r"^```(?:json)?\n?", "", raw)
-    raw = re.sub(r"\n?```$", "", raw)
+    raw = re.sub(r"^```(?:json)?\n?|\n?```$", "", msg.content[0].text.strip())
     return json.loads(raw)
 
+# ── Lecture / écriture Google Sheets ─────────────────────────────────────────
+def read_current(ws: gspread.Worksheet, row: int) -> float:
+    val = ws.cell(row, REEL_COL).value
+    try:
+        return float(str(val).replace(",", ".")) if val else 0.0
+    except ValueError:
+        return 0.0
 
-# ── Excel ─────────────────────────────────────────────────────────────────────
-def read_current(path: str, row: int) -> float:
-    wb  = openpyxl.load_workbook(path)
-    val = wb[SHEET_NAME].cell(row=row, column=REEL_COL).value
-    wb.close()
-    return float(val) if val else 0.0
-
-
-def save_expense(path: str, row: int, amount: float, note: str):
-    wb  = openpyxl.load_workbook(path)
-    ws  = wb[SHEET_NAME]
-    cur = ws.cell(row=row, column=REEL_COL).value or 0
-    ws.cell(row=row, column=REEL_COL).value = round(float(cur) + amount, 2)
+def save_expense(ws: gspread.Worksheet, row: int, amount: float, note: str):
+    current = read_current(ws, row)
+    ws.update_cell(row, REEL_COL, round(current + amount, 2))
     if note:
-        existing = ws.cell(row=row, column=NOTE_COL).value or ""
-        ws.cell(row=row, column=NOTE_COL).value = (existing + " | " if existing else "") + note
-    wb.save(path)
-    wb.close()
-
+        existing = ws.cell(row, NOTE_COL).value or ""
+        ws.update_cell(row, NOTE_COL, (existing + " | " if existing else "") + note)
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 st.title("🧾 Tickets de caisse → Budget Montréal")
-st.caption("Prends une photo de ton ticket, la dépense s'ajoute automatiquement dans ton budget.")
+st.caption("Prends une photo de ton ticket, la dépense s'ajoute automatiquement dans Google Sheets.")
 
-# Sidebar : config
-with st.sidebar:
-    st.header("Configuration")
-
-    api_key = get_api_key()
-    if not api_key:
-        api_key = st.text_input("Clé API Anthropic", type="password",
-                                help="console.anthropic.com → API Keys")
-    else:
-        st.success("Clé API chargée")
-
-    st.divider()
-    st.subheader("Fichier Excel")
-    excel_mode = st.radio("Fichier budget", ["Uploader le fichier", "Chemin local (PC uniquement)"])
-
-    excel_path  = None
-    excel_bytes = None
-
-    if excel_mode == "Uploader le fichier":
-        uploaded_excel = st.file_uploader("budget_montreal_v2.xlsx", type=["xlsx"])
-        if uploaded_excel:
-            excel_bytes = uploaded_excel.read()
-            st.success("Fichier chargé")
-    else:
-        default_path = r"C:\Users\victo\Desktop\budget_montreal_v2.xlsx"
-        excel_path   = st.text_input("Chemin", value=default_path)
-        if os.path.exists(excel_path):
-            st.success("Fichier trouvé")
-        else:
-            st.error("Fichier introuvable")
-
-# Vérification prérequis
+api_key = get_api_key()
 if not api_key:
-    st.warning("Entre ta clé API Anthropic dans la barre latérale pour commencer.")
-    st.info("Crée un compte gratuit sur **console.anthropic.com** → API Keys → Create Key. Tu reçois 5 $ de crédit offert (~5 000 tickets gratuits).")
+    st.error("Clé API Anthropic manquante dans les secrets Streamlit.")
     st.stop()
 
-if excel_mode == "Uploader le fichier" and not excel_bytes:
-    st.info("Upload ton fichier Excel dans la barre latérale.")
+# Connexion Google Sheets
+try:
+    ws = get_gsheet()
+except Exception as e:
+    st.error(f"Impossible de se connecter à Google Sheets : {e}")
     st.stop()
-elif excel_mode == "Chemin local (PC uniquement)" and not os.path.exists(excel_path):
-    st.error("Fichier Excel introuvable.")
+
+if ws is None:
+    st.warning(f"La feuille '{SHEET_NAME}' n'existe pas encore.")
+    if st.button("Initialiser le budget dans Google Sheets"):
+        sh = gspread.authorize(
+            Credentials.from_service_account_info(
+                dict(st.secrets["gcp_service_account"]),
+                scopes=["https://spreadsheets.google.com/feeds",
+                        "https://www.googleapis.com/auth/drive"],
+            )
+        ).open_by_key(st.secrets["SPREADSHEET_ID"])
+        ws = sh.add_worksheet(SHEET_NAME, rows=30, cols=6)
+        init_sheet(ws)
+        st.success("Budget initialisé dans Google Sheets !")
+        st.rerun()
     st.stop()
+
+# Lien vers le Google Sheet
+sheet_url = f"https://docs.google.com/spreadsheets/d/{st.secrets['SPREADSHEET_ID']}"
+st.markdown(f"[Voir le budget en direct sur Google Sheets]({sheet_url})")
+
+st.divider()
 
 # Upload ticket
-st.divider()
-uploaded = st.file_uploader("📷 Dépose la photo de ton ticket ici", type=["jpg","jpeg","png","webp","heic"])
+uploaded = st.file_uploader("📷 Photo du ticket de caisse", type=["jpg","jpeg","png","webp","heic"])
 
 if not uploaded:
     st.markdown("""
-**Astuce téléphone** : prends la photo dans un endroit bien éclairé, ticket bien à plat.
-Le ticket peut être en français ou en anglais.
+**Astuce** : ticket bien à plat, bonne lumière.
+Après chaque scan, ta dépense s'ajoute directement dans Google Sheets — accessible depuis ton téléphone en temps réel.
     """)
     st.stop()
 
 img = Image.open(uploaded)
 st.image(img, caption="Ticket reçu", use_column_width=True)
 
-if st.button("🔍 Analyser le ticket", type="primary", use_container_width=True):
+if st.button("🔍 Analyser", type="primary", use_container_width=True):
     with st.spinner("Claude lit ton ticket..."):
         try:
             result = analyze_receipt(img, api_key)
-            st.session_state["result"]   = result
-            st.session_state["analyzed"] = True
+            st.session_state.update({"result": result, "analyzed": True})
         except json.JSONDecodeError:
-            st.error("Le ticket n'a pas pu être analysé. Essaie avec une photo plus nette.")
+            st.error("Ticket illisible — essaie avec une photo plus nette.")
             st.session_state["analyzed"] = False
         except anthropic.AuthenticationError:
-            st.error("Clé API invalide. Vérifie ta clé dans la barre latérale.")
+            st.error("Clé API invalide.")
             st.session_state["analyzed"] = False
         except Exception as e:
             st.error(f"Erreur : {e}")
@@ -212,72 +202,48 @@ if not st.session_state.get("analyzed"):
 
 result = st.session_state["result"]
 
-# Résultats
 st.divider()
-st.subheader("Ce que Claude a lu sur ton ticket")
+st.subheader("Vérification avant ajout")
 
-col_info, col_form = st.columns([1, 1])
+col1, col2 = st.columns(2)
 
-with col_info:
-    st.markdown(f"**Magasin :** {result.get('store', 'Non détecté')}")
+with col1:
+    st.markdown(f"**Magasin :** {result.get('store','Non détecté')}")
     st.markdown(f"**Date :** {result.get('date', date.today().isoformat())}")
     if result.get("items_summary"):
-        st.markdown(f"**Achats :** {result['items_summary']}")
+        st.caption(result["items_summary"])
 
-with col_form:
-    detected_total = result.get("total")
-    if detected_total:
-        amount = st.number_input("Montant ($ CA)", value=float(detected_total),
+    detected = result.get("total")
+    if detected:
+        amount = st.number_input("Montant ($ CA)", value=float(detected),
                                   min_value=0.01, step=0.01, format="%.2f")
     else:
-        st.warning("Montant non détecté, entre-le manuellement.")
+        st.warning("Montant non détecté.")
         amount = st.number_input("Montant ($ CA)", min_value=0.01, step=0.01, format="%.2f")
 
+with col2:
     detected_cat = result.get("category", "Imprevus")
-    default_idx  = CAT_NAMES.index(detected_cat) if detected_cat in CAT_NAMES else len(CAT_NAMES)-1
-    category     = st.selectbox("Catégorie", CAT_NAMES, index=default_idx)
+    default_idx = CAT_NAMES.index(detected_cat) if detected_cat in CAT_NAMES else len(CAT_NAMES)-1
+    category = st.selectbox("Catégorie", CAT_NAMES, index=default_idx)
+    note = st.text_input("Note (optionnel)",
+                          placeholder=f"{result.get('store','')} {result.get('date','')}")
 
-note = st.text_input("Note (optionnel)", placeholder=f"ex: {result.get('store','Ticket')} du {result.get('date', date.today().isoformat())}")
+row    = CAT_ROW[category]
+before = read_current(ws, row)
+after  = round(before + amount, 2)
 
-# Aperçu de l'impact
-row = CAT_ROW[category]
-if excel_bytes:
-    tmp_path = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Temp", "budget_tmp.xlsx")
-    with open(tmp_path, "wb") as f:
-        f.write(excel_bytes)
-    before = read_current(tmp_path, row)
-else:
-    before = read_current(excel_path, row)
-
-after = round(before + amount, 2)
 st.markdown(f"""
-| Poste | Avant | Après ajout |
+| Poste | Avant | Après |
 |---|---|---|
-| **{category}** | {before:.2f} $ CA | **{after:.2f} $ CA** |
+| **{category}** | {before:.2f} $ | **{after:.2f} $** |
 """)
 
-# Enregistrement
 if st.button("✅ Ajouter au budget", type="primary", use_container_width=True):
     try:
-        if excel_bytes:
-            save_expense(tmp_path, row, amount, note)
-            with open(tmp_path, "rb") as f:
-                updated = f.read()
-            st.success(f"**{amount:.2f} $ CA** ajouté à **{category}** — nouveau total : **{after:.2f} $ CA**")
-            st.download_button(
-                "⬇️ Télécharger le budget mis à jour",
-                data=updated,
-                file_name="budget_montreal_v2.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-        else:
-            save_expense(excel_path, row, amount, note)
-            st.success(f"**{amount:.2f} $ CA** ajouté à **{category}** — nouveau total : **{after:.2f} $ CA**")
-
+        save_expense(ws, row, amount, note)
+        st.success(f"**{amount:.2f} $ CA** ajouté à **{category}** — total : **{after:.2f} $ CA**")
+        st.markdown(f"[Voir dans Google Sheets]({sheet_url})")
         st.balloons()
         st.session_state["analyzed"] = False
-    except PermissionError:
-        st.error("Ferme le fichier Excel dans Excel, puis réessaie.")
     except Exception as e:
         st.error(f"Erreur : {e}")

@@ -1,4 +1,5 @@
 streamlit
 anthropic
+gspread
+google-auth
 pillow
-openpyxl
