@@ -153,6 +153,15 @@ if ws is None:
         st.rerun()
     st.stop()
 
+if ws.cell(4, 1).value != "Poste":
+    st.warning(f"La feuille '{SHEET_NAME}' existe mais n'est pas initialisée.")
+    if st.button("Initialiser le budget dans Google Sheets", type="primary"):
+        init_sheet(ws)
+        st.cache_resource.clear()
+        st.success("Budget initialisé !")
+        st.rerun()
+    st.stop()
+
 sheet_url = f"https://docs.google.com/spreadsheets/d/{st.secrets['SPREADSHEET_ID']}"
 st.markdown(f"[📊 Voir le budget en direct]({sheet_url})")
 st.divider()
