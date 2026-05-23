@@ -1,5 +1,6 @@
 streamlit
 gspread
 google-auth
-google-cloud-vision
 pillow
+pytesseract
+numpy

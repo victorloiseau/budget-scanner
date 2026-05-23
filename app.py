@@ -1,9 +1,9 @@
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
-from google.cloud import vision
+import pytesseract
 import re, io
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
 from datetime import date
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -33,120 +33,107 @@ CATEGORIES = [
 CAT_NAMES = [n for n, _ in CATEGORIES]
 CAT_ROW   = {n: r for n, r in CATEGORIES}
 
-BUDGET_SERRE    = [200, 0, 0, 55, 20, 0, 25, 10, 15, 10, 30, 0, 0, 20, 50]
-BUDGET_REALISTE = [270,80,20,55, 40, 0, 40, 20, 50, 20,100,20,15, 20,100]
+BUDGET_SERRE    = [200,  0,  0, 55, 20,  0, 25, 10, 15, 10,  30,  0,  0, 20,  50]
+BUDGET_REALISTE = [270, 80, 20, 55, 40,  0, 40, 20, 50, 20, 100, 20, 15, 20, 100]
 
 AUTO_DETECT = {
     "Epicerie":                 ["maxi","iga","metro","provigo","costco","walmart",
-                                 "supermarche","marche","grocery","alimentation","loblaws"],
-    "Restaurants / cafeteria":  ["restaurant","cafeteria","mcdonald","mcdo","subway",
-                                 "burger","pizza","sushi","bistro","brasserie","tim horton",
+                                 "supermarche","marche","grocery","loblaws","alimentation"],
+    "Restaurants / cafeteria":  ["restaurant","cafeteria","mcdonald","subway","burger",
+                                 "pizza","sushi","bistro","brasserie","tim horton",
                                  "popeyes","wendy","five guys"],
-    "Cafe / boissons":          ["starbucks","second cup","van houtte","cafe","coffee","tim horton"],
+    "Cafe / boissons":          ["starbucks","second cup","van houtte","cafe","coffee"],
     "Pharmacie":                ["pharmaprix","jean coutu","uniprix","shoppers","pharmacie"],
     "Hygiene & soin":           ["sephora","beauty","cosmetique","parfum"],
     "Sorties & loisirs":        ["cinema","musee","theatre","spectacle","concert"],
     "Livres & materiel etudes": ["librairie","indigo","chapitres","parascolaire"],
-    "Sport / gym":              ["gym","sport","fitness","running","athletic"],
+    "Sport / gym":              ["gym","sport","fitness","athletic"],
 }
 
 SCOPES = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/cloud-vision",
 ]
-
-# ── Credentials ───────────────────────────────────────────────────────────────
-@st.cache_resource
-def get_credentials():
-    return Credentials.from_service_account_info(
-        dict(st.secrets["gcp_service_account"]),
-        scopes=SCOPES,
-    )
 
 # ── Google Sheets ─────────────────────────────────────────────────────────────
 @st.cache_resource
 def get_gsheet():
-    creds = get_credentials()
-    gc    = gspread.authorize(creds)
-    sh    = gc.open_by_key(st.secrets["SPREADSHEET_ID"])
+    creds = Credentials.from_service_account_info(
+        dict(st.secrets["gcp_service_account"]), scopes=SCOPES)
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(st.secrets["SPREADSHEET_ID"])
     try:
         return sh.worksheet(SHEET_NAME)
     except gspread.WorksheetNotFound:
         return None
 
 def init_sheet(ws):
-    headers = ["Poste de depense","Budget serre ($ CA)","Budget realiste ($ CA)",
-               "REEL ($ CA)","Ecart vs Realiste","Notes / Date"]
-    ws.update("A4:F4", [headers])
-    rows = []
-    for (label, _), s, r in zip(CATEGORIES, BUDGET_SERRE, BUDGET_REALISTE):
-        row_num = 5 + len(rows)
-        rows.append([label, s, r, 0, f"=D{row_num}-C{row_num}", ""])
-    ws.update(f"A5:F{4+len(rows)}", rows)
-    total_row = 5 + len(rows)
-    ws.update(f"A{total_row}:F{total_row}", [[
-        "TOTAL", sum(BUDGET_SERRE), sum(BUDGET_REALISTE),
-        f"=SUM(D5:D{total_row-1})", f"=D{total_row}-C{total_row}", ""
-    ]])
     ws.update("A1:A2", [
         ["Budget Montreal - Victor Loiseau"],
-        ["Logement + chauffage + electricite inclus dans Darlington — non comptes"],
+        ["Logement + chauffage + electricite inclus dans Darlington"],
     ])
+    ws.update("A4:F4", [["Poste","Budget serre ($ CA)","Budget realiste ($ CA)",
+                          "REEL ($ CA)","Ecart vs Realiste","Notes / Date"]])
+    rows = []
+    for (label, _), s, r in zip(CATEGORIES, BUDGET_SERRE, BUDGET_REALISTE):
+        n = 5 + len(rows)
+        rows.append([label, s, r, 0, f"=D{n}-C{n}", ""])
+    ws.update(f"A5:F{4+len(rows)}", rows)
+    t = 5 + len(rows)
+    ws.update(f"A{t}:F{t}", [["TOTAL", sum(BUDGET_SERRE), sum(BUDGET_REALISTE),
+                               f"=SUM(D5:D{t-1})", f"=D{t}-C{t}", ""]])
 
-def read_current(ws, row: int) -> float:
+def read_current(ws, row):
     val = ws.cell(row, REEL_COL).value
     try:
         return float(str(val).replace(",", ".")) if val else 0.0
     except ValueError:
         return 0.0
 
-def save_expense(ws, row: int, amount: float, note: str):
-    current = read_current(ws, row)
-    ws.update_cell(row, REEL_COL, round(current + amount, 2))
+def save_expense(ws, row, amount, note):
+    cur = read_current(ws, row)
+    ws.update_cell(row, REEL_COL, round(cur + amount, 2))
     if note:
-        existing = ws.cell(row, NOTE_COL).value or ""
-        ws.update_cell(row, NOTE_COL, (existing + " | " if existing else "") + note)
+        ex = ws.cell(row, NOTE_COL).value or ""
+        ws.update_cell(row, NOTE_COL, (ex + " | " if ex else "") + note)
 
-# ── Google Vision OCR ─────────────────────────────────────────────────────────
-def ocr_receipt(image: Image.Image) -> str:
-    creds  = get_credentials()
-    client = vision.ImageAnnotatorClient(credentials=creds)
-    buf    = io.BytesIO()
-    image.convert("RGB").save(buf, format="JPEG", quality=90)
-    response = client.text_detection(image=vision.Image(content=buf.getvalue()))
-    if response.error.message:
-        raise Exception(response.error.message)
-    annotations = response.text_annotations
-    return annotations[0].description if annotations else ""
+# ── OCR ───────────────────────────────────────────────────────────────────────
+def preprocess(img: Image.Image) -> Image.Image:
+    img = img.convert("L")
+    img = ImageEnhance.Contrast(img).enhance(2.5)
+    img = ImageEnhance.Sharpness(img).enhance(2.0)
+    img = img.filter(ImageFilter.SHARPEN)
+    return img
 
-def extract_total(text: str) -> float | None:
+def ocr_receipt(img: Image.Image) -> str:
+    processed = preprocess(img)
+    config    = "--oem 3 --psm 6 -l fra+eng"
+    return pytesseract.image_to_string(processed, config=config)
+
+def extract_total(text: str):
     lines = text.lower().split("\n")
-    kws   = ["total","montant","a payer","due","balance","sous-total","grand total","amount"]
     for line in reversed(lines):
-        if any(k in line for k in kws):
+        if any(k in line for k in ["total","montant","a payer","due","balance","amount"]):
             amounts = re.findall(r"\d{1,4}[.,]\d{2}", line)
             if amounts:
                 return float(amounts[-1].replace(",", "."))
-    all_amounts = re.findall(r"\d{1,4}[.,]\d{2}", text)
-    return max((float(a.replace(",", ".")) for a in all_amounts), default=None)
+    all_a = re.findall(r"\d{1,4}[.,]\d{2}", text)
+    return max((float(a.replace(",", ".")) for a in all_a), default=None)
 
 def detect_store(text: str) -> str:
-    first_lines = " ".join(text.split("\n")[:3])
-    return first_lines.strip() or "Non détecté"
+    return " ".join(text.split("\n")[:2]).strip() or "Non détecté"
 
 def detect_category(text: str) -> str:
     tl = text.lower()
-    for cat, keywords in AUTO_DETECT.items():
-        if any(k in tl for k in keywords):
+    for cat, kws in AUTO_DETECT.items():
+        if any(k in tl for k in kws):
             return cat
     return "Imprevus"
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 st.title("🧾 Tickets de caisse → Budget Montréal")
-st.caption("Prends une photo de ton ticket — la dépense s'ajoute automatiquement dans Google Sheets.")
+st.caption("Photo du ticket → dépense ajoutée automatiquement dans Google Sheets.")
 
-# Connexion
 try:
     ws = get_gsheet()
 except Exception as e:
@@ -156,9 +143,9 @@ except Exception as e:
 if ws is None:
     st.warning(f"La feuille '{SHEET_NAME}' n'existe pas encore.")
     if st.button("Initialiser le budget dans Google Sheets", type="primary"):
-        creds = get_credentials()
-        gc = gspread.authorize(creds)
-        sh = gc.open_by_key(st.secrets["SPREADSHEET_ID"])
+        creds = Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]), scopes=SCOPES)
+        sh = gspread.authorize(creds).open_by_key(st.secrets["SPREADSHEET_ID"])
         ws = sh.add_worksheet(SHEET_NAME, rows=30, cols=6)
         init_sheet(ws)
         st.cache_resource.clear()
@@ -168,19 +155,17 @@ if ws is None:
 
 sheet_url = f"https://docs.google.com/spreadsheets/d/{st.secrets['SPREADSHEET_ID']}"
 st.markdown(f"[📊 Voir le budget en direct]({sheet_url})")
-
 st.divider()
 
-# Upload
-uploaded = st.file_uploader("📷 Photo du ticket de caisse", type=["jpg","jpeg","png","webp","heic"])
+uploaded = st.file_uploader("📷 Photo du ticket", type=["jpg","jpeg","png","webp","heic"])
 
 if not uploaded:
     st.markdown("""
-**Comment ça marche :**
-1. Prends ton ticket en photo
+**Mode d'emploi :**
+1. Prends le ticket en photo (bien éclairé, bien à plat)
 2. Dépose-le ici
 3. Vérifie montant et catégorie
-4. Clique Ajouter — c'est dans Google Sheets en 3 secondes
+4. Clique Ajouter → Google Sheets se met à jour
     """)
     st.stop()
 
@@ -188,7 +173,7 @@ img = Image.open(uploaded)
 st.image(img, caption="Ticket reçu", use_column_width=True)
 
 if st.button("🔍 Analyser", type="primary", use_container_width=True):
-    with st.spinner("Lecture du ticket en cours..."):
+    with st.spinner("Lecture du ticket..."):
         try:
             text     = ocr_receipt(img)
             total    = extract_total(text)
@@ -196,8 +181,7 @@ if st.button("🔍 Analyser", type="primary", use_container_width=True):
             category = detect_category(text)
             st.session_state.update({
                 "text": text, "total": total,
-                "store": store, "category": category,
-                "analyzed": True,
+                "store": store, "category": category, "analyzed": True,
             })
         except Exception as e:
             st.error(f"Erreur OCR : {e}")
@@ -210,34 +194,29 @@ st.divider()
 st.subheader("Vérification avant ajout")
 
 col1, col2 = st.columns(2)
-
 with col1:
     st.markdown(f"**Magasin :** {st.session_state['store']}")
     t = st.session_state["total"]
     if t:
         amount = st.number_input("Montant ($ CA)", value=float(t), min_value=0.01, step=0.01, format="%.2f")
     else:
-        st.warning("Montant non détecté, entre-le manuellement.")
+        st.warning("Montant non détecté — entre-le manuellement.")
         amount = st.number_input("Montant ($ CA)", min_value=0.01, step=0.01, format="%.2f")
 
 with col2:
-    detected_cat = st.session_state["category"]
-    default_idx  = CAT_NAMES.index(detected_cat) if detected_cat in CAT_NAMES else len(CAT_NAMES)-1
-    category     = st.selectbox("Catégorie", CAT_NAMES, index=default_idx)
-    note         = st.text_input("Note (optionnel)", placeholder=f"{date.today().isoformat()}")
+    cat      = st.session_state["category"]
+    def_idx  = CAT_NAMES.index(cat) if cat in CAT_NAMES else len(CAT_NAMES)-1
+    category = st.selectbox("Catégorie", CAT_NAMES, index=def_idx)
+    note     = st.text_input("Note (optionnel)", placeholder=date.today().isoformat())
 
 with st.expander("Texte brut lu sur le ticket"):
-    st.text(st.session_state.get("text", ""))
+    st.text(st.session_state.get("text",""))
 
 row    = CAT_ROW[category]
 before = read_current(ws, row)
 after  = round(before + amount, 2)
 
-st.markdown(f"""
-| Poste | Avant | Après |
-|---|---|---|
-| **{category}** | {before:.2f} $ | **{after:.2f} $** |
-""")
+st.markdown(f"| **{category}** | Avant : {before:.2f} $ | Après : **{after:.2f} $** |")
 
 if st.button("✅ Ajouter au budget", type="primary", use_container_width=True):
     try:
