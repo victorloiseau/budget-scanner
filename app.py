@@ -71,21 +71,44 @@ def get_gsheet():
         return sh, None
 
 def init_sheet(ws):
-    ws.update("A1:A2", [
-        ["Budget Montreal - Victor Loiseau"],
-        ["Logement + chauffage + electricite inclus dans Darlington"],
+    ws.clear()
+    t = 5 + len(CATEGORIES)  # TOTAL row index
+
+    ws.update("A1:B2", [
+        ["Budget Montreal - Victor Loiseau", ""],
+        ["Logement + chauffage + electricite inclus dans Darlington", ""],
     ])
-    ws.update("A4:F4", [["Poste","Budget serre ($ CA)","Budget realiste ($ CA)",
-                          "REEL ($ CA)","Ecart vs Realiste","Notes / Date"]])
+    ws.update("A4:F4", [["Poste", "Budget serre ($ CA)", "Budget realiste ($ CA)",
+                          "REEL ($ CA)", "Ecart vs Realiste", "Notes / Date"]])
+
     rows = []
-    for (label, _), s, r in zip(CATEGORIES, BUDGET_SERRE, BUDGET_REALISTE):
-        n = 5 + len(rows)
+    for i, ((label, _), s, r) in enumerate(zip(CATEGORIES, BUDGET_SERRE, BUDGET_REALISTE)):
+        n = 5 + i
         rows.append([label, s, r, 0, f"=D{n}-C{n}", ""])
-    ws.update(f"A5:F{4+len(rows)}", rows, value_input_option="USER_ENTERED")
-    t = 5 + len(rows)
+    ws.update(f"A5:F{t-1}", rows, value_input_option="USER_ENTERED")
     ws.update(f"A{t}:F{t}", [["TOTAL", sum(BUDGET_SERRE), sum(BUDGET_REALISTE),
                                f"=SUM(D5:D{t-1})", f"=D{t}-C{t}", ""]],
               value_input_option="USER_ENTERED")
+
+    # ── Formatting ──
+    blue  = {"red": 0.263, "green": 0.522, "blue": 0.957}
+    lblue = {"red": 0.812, "green": 0.886, "blue": 0.953}
+    white = {"red": 1.0,   "green": 1.0,   "blue": 1.0}
+    money = {"numberFormat": {"type": "NUMBER", "pattern": "#,##0.00"}}
+
+    ws.format("A1:F1", {"textFormat": {"bold": True, "fontSize": 13}})
+    ws.format("A4:F4", {
+        "backgroundColor": blue,
+        "textFormat": {"bold": True, "foregroundColor": white},
+        "horizontalAlignment": "CENTER",
+    })
+    ws.format(f"A5:A{t-1}", {"textFormat": {"bold": True}})
+    ws.format(f"B5:E{t-1}", money)
+    ws.format(f"A{t}:F{t}", {
+        **money,
+        "backgroundColor": lblue,
+        "textFormat": {"bold": True},
+    })
 
 def read_current(ws, row):
     val = ws.cell(row, REEL_COL).value
@@ -156,11 +179,13 @@ if ws is None:
 
 try:
     header_val = ws.cell(4, 1).value
+    ecart_val  = ws.cell(5, 5).value
 except Exception as e:
     st.error(f"Erreur lecture sheet : {e}")
     st.stop()
 
-if header_val != "Poste":
+formulas_broken = ecart_val is not None and str(ecart_val).startswith("=")
+if header_val != "Poste" or formulas_broken:
     with st.spinner("Mise en place du budget..."):
         try:
             init_sheet(ws)
