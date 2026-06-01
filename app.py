@@ -61,7 +61,7 @@ SCOPES = [
 def get_client():
     creds = Credentials.from_service_account_info(
         dict(st.secrets["gcp_service_account"]), scopes=SCOPES)
-    return gspread.authorize(creds)
+    return gspread.Client(auth=creds)
 
 def get_gsheet():
     gc = get_client()
@@ -234,7 +234,7 @@ if not uploaded:
     st.stop()
 
 img = Image.open(uploaded)
-st.image(img, caption="Ticket reçu", use_column_width=True)
+st.image(img, caption="Ticket reçu", use_container_width=True)
 
 if st.button("🔍 Analyser", type="primary", use_container_width=True):
     with st.spinner("Lecture du ticket..."):
